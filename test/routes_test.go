@@ -691,18 +691,18 @@ func TestRouteSendAsyncINFOToClients(t *testing.T) {
 	if err := json.Unmarshal(buf[4:], &info); err != nil {
 		t.Fatalf("Could not unmarshal route info: %v", err)
 	}
-	if len(info.ConnectURLs) == 0 {
+	if len(info.ClientConnectURLs) == 0 {
 		t.Fatal("Expected a list of URLs, got none")
 	}
-	if info.ConnectURLs[0] != clientURL {
-		t.Fatalf("Expected RemoteClientURL to be %q, got %q", clientURL, info.ConnectURLs[0])
+	if info.ClientConnectURLs[0] != clientURL {
+		t.Fatalf("Expected ClientConnectURLs to be %q, got %q", clientURL, info.ClientConnectURLs[0])
 	}
 	routeInfo := server.Info{}
 	routeInfo.ID = routeID
 	routeInfo.Host = "localhost"
 	routeInfo.Port = 5222
 	routeConnectURLs := net.JoinHostPort(routeInfo.Host, strconv.Itoa(routeInfo.Port))
-	routeInfo.ConnectURLs = []string{routeConnectURLs}
+	routeInfo.ClientConnectURLs = []string{routeConnectURLs}
 	b, err := json.Marshal(routeInfo)
 	if err != nil {
 		t.Fatalf("Could not marshal test route info: %v", err)
@@ -721,10 +721,10 @@ func TestRouteSendAsyncINFOToClients(t *testing.T) {
 	if err := json.Unmarshal(buf[4:], &info); err != nil {
 		t.Fatalf("Could not unmarshal route info: %v", err)
 	}
-	if len(info.ConnectURLs) == 0 {
+	if len(info.ClientConnectURLs) == 0 {
 		t.Fatal("Expected a list of URLs, got none")
 	}
-	if info.ConnectURLs[0] != routeConnectURLs {
-		t.Fatalf("Expected RemoteClientURL to be %q, got %q", routeConnectURLs, info.ConnectURLs[0])
+	if info.ClientConnectURLs[0] != routeConnectURLs {
+		t.Fatalf("Expected ClientConnectURLs to be %q, got %q", routeConnectURLs, info.ClientConnectURLs[0])
 	}
 }

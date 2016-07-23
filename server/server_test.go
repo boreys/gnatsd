@@ -146,7 +146,7 @@ func TestGetConnectURLs(t *testing.T) {
 	s := New(&opts)
 	defer s.Shutdown()
 
-	urls := s.getConnectURLs()
+	urls := s.getClientConnectURLs()
 	if len(urls) == 0 {
 		t.Fatal("Expected to get a list of urls, got none")
 	}
@@ -163,7 +163,7 @@ func TestGetConnectURLs(t *testing.T) {
 	defer s.Shutdown()
 
 	expectedURL := "localhost:4222"
-	urls = s.getConnectURLs()
+	urls = s.getClientConnectURLs()
 	if len(urls) == 0 {
 		t.Fatal("Expected to get a list of urls, got none")
 	}

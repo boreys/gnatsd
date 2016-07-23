@@ -24,18 +24,18 @@ import (
 // Info is the information sent to clients to help them understand information
 // about this server.
 type Info struct {
-	ID           string   `json:"server_id"`
-	Version      string   `json:"version"`
-	GoVersion    string   `json:"go"`
-	Host         string   `json:"host"`
-	Port         int      `json:"port"`
-	AuthRequired bool     `json:"auth_required"`
-	SSLRequired  bool     `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
-	TLSRequired  bool     `json:"tls_required"`
-	TLSVerify    bool     `json:"tls_verify"`
-	MaxPayload   int      `json:"max_payload"`
-	IP           string   `json:"ip,omitempty"`
-	ConnectURLs  []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
+	ID                string   `json:"server_id"`
+	Version           string   `json:"version"`
+	GoVersion         string   `json:"go"`
+	Host              string   `json:"host"`
+	Port              int      `json:"port"`
+	AuthRequired      bool     `json:"auth_required"`
+	SSLRequired       bool     `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
+	TLSRequired       bool     `json:"tls_required"`
+	TLSVerify         bool     `json:"tls_verify"`
+	MaxPayload        int      `json:"max_payload"`
+	IP                string   `json:"ip,omitempty"`
+	ClientConnectURLs []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
 }
 
 // Server is our main struct.
@@ -70,7 +70,7 @@ type Server struct {
 	grTmpClients  map[uint64]*client
 	grRunning     bool
 	grWG          sync.WaitGroup // to wait on various go routines
-	nCliProtoInfo int64          // number of clients supporting async INFO
+	cproto        int64          // number of clients supporting async INFO
 }
 
 // Make sure all are 64bits for atomic use
@@ -623,10 +623,10 @@ func (s *Server) getProtoInfoWithServers() []byte {
 	for _, c := range s.routes {
 		r := c.route
 		// Disregard routes for which we don't have the remote client's host:port information
-		if r == nil || len(r.connectURLs) == 0 {
+		if r == nil || len(r.clientConnectURLs) == 0 {
 			continue
 		}
-		for _, url := range r.connectURLs {
+		for _, url := range r.clientConnectURLs {
 			urls = append(urls, url)
 		}
 	}
@@ -639,7 +639,7 @@ func (s *Server) getProtoInfoWithServers() []byte {
 
 	// Build the proto
 	info := s.info
-	info.ConnectURLs = urls
+	info.ClientConnectURLs = urls
 	b, _ := json.Marshal(info)
 	return []byte(fmt.Sprintf("INFO %s %s", b, CR_LF))
 }
@@ -758,7 +758,7 @@ func (s *Server) removeClient(c *client) {
 	case CLIENT:
 		delete(s.clients, cid)
 		if updateProtoInfoCount {
-			s.nCliProtoInfo--
+			s.cproto--
 		}
 	case ROUTER:
 		delete(s.routes, cid)
@@ -879,14 +879,14 @@ func (s *Server) startGoRoutine(f func()) {
 	s.grMu.Unlock()
 }
 
-// getConnectURLs returns suitable URLs for clients to connect to the listen
+// getClientConnectURLs returns suitable URLs for clients to connect to the listen
 // port based on the server options' Host and Port. If the Host is localhost
 // or "any", this call returns the list of resolved IP addresses.
-func (s *Server) getConnectURLs() []string {
+func (s *Server) getClientConnectURLs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sport := strconv.Itoa(s.opts.Port)
+	sPort := strconv.Itoa(s.opts.Port)
 	urls := make([]string, 0, 1)
 
 	ipAddr, err := net.ResolveIPAddr("ip", s.opts.Host)
@@ -909,13 +909,14 @@ func (s *Server) getConnectURLs() []string {
 					ip = nil
 					continue
 				}
-				urls = append(urls, net.JoinHostPort(ip.String(), sport))
+				urls = append(urls, net.JoinHostPort(ip.String(), sPort))
 			}
 		}
 	}
-	// Make sure we return at least one!
 	if err != nil || len(urls) == 0 {
-		urls = append(urls, net.JoinHostPort(s.opts.Host, sport))
+		// We are here if s.opts.Host is not "0.0.0.0" nor "::", or if for some
+		// reason we could not add any URL in the loop above.
+		urls = append(urls, net.JoinHostPort(s.opts.Host, sPort))
 	}
 	return urls
 }

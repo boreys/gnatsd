@@ -29,14 +29,14 @@ const (
 )
 
 type route struct {
-	remoteID     string
-	didSolicit   bool
-	retry        bool
-	routeType    RouteType
-	url          *url.URL
-	authRequired bool
-	tlsRequired  bool
-	connectURLs  []string
+	remoteID          string
+	didSolicit        bool
+	retry             bool
+	routeType         RouteType
+	url               *url.URL
+	authRequired      bool
+	tlsRequired       bool
+	clientConnectURLs []string
 }
 
 type connectInfo struct {
@@ -117,8 +117,8 @@ func (c *client) processRouteInfo(info *Info) {
 	c.route.authRequired = info.AuthRequired
 	c.route.tlsRequired = info.TLSRequired
 	// Copy the URLs from the protocol message
-	c.route.connectURLs = make([]string, len(info.ConnectURLs))
-	copy(c.route.connectURLs, info.ConnectURLs)
+	c.route.clientConnectURLs = make([]string, len(info.ClientConnectURLs))
+	copy(c.route.clientConnectURLs, info.ClientConnectURLs)
 
 	// If we do not know this route's URL, construct one on the fly
 	// from the information provided.
@@ -171,27 +171,41 @@ func (c *client) processRouteInfo(info *Info) {
 // INFO updates.
 func (s *Server) sendInfoWithServersToClients() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// If there are no client supporting the async INFOs, we are done.
-	if s.nCliProtoInfo == 0 {
+	if s.cproto == 0 {
+		s.mu.Unlock()
 		return
 	}
 
 	// Get the proto with all routes
 	proto := s.getProtoInfoWithServers()
 	if proto == nil {
+		s.mu.Unlock()
 		// This means that we don't have any route, or none that has
 		// the host:port info for clients to connect to (older servers).
 		return
 	}
 
-	// Send the info proto to the clients that support it
+	// Make a copy of ALL clients so we can release server lock while
+	// sending the protocol to clients. We could check the conditions
+	// (proto support, first PONG sent) here and so have potentially
+	// a limited number of clients, but that would mean grabbing the
+	// client's lock here, which we don't want since we would still
+	// need it in the second loop.
+	clients := make([]*client, 0, len(s.clients))
 	for _, c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.Unlock()
+
+	// Send the info proto to the clients that support it
+	for _, c := range clients {
 		c.mu.Lock()
 		// Send only if we already sent the first PONG, if not, a new
 		// INFO will be generated at that time.
 		if c.fps && c.opts.Protocol >= ClientProtoInfo {
+			// sendInfo takes care of checking if the connection is still
+			// valid or not, so don't duplicate tests here.
 			c.sendInfo(proto)
 		}
 		c.mu.Unlock()
@@ -628,21 +642,21 @@ func (s *Server) StartRouting(clientListenReady chan struct{}) {
 	// Get all possible URLs (when server listens to 0.0.0.0).
 	// This is going to be sent to other Servers, so that they can let their
 	// clients know about us.
-	connectURLs := s.getConnectURLs()
+	clientConnectURLs := s.getClientConnectURLs()
 
 	// Check for TLSConfig
 	tlsReq := s.opts.ClusterTLSConfig != nil
 	info := Info{
-		ID:           s.info.ID,
-		Version:      s.info.Version,
-		Host:         s.opts.ClusterHost,
-		Port:         s.opts.ClusterPort,
-		AuthRequired: false,
-		TLSRequired:  tlsReq,
-		SSLRequired:  tlsReq,
-		TLSVerify:    tlsReq,
-		MaxPayload:   s.info.MaxPayload,
-		ConnectURLs:  connectURLs,
+		ID:                s.info.ID,
+		Version:           s.info.Version,
+		Host:              s.opts.ClusterHost,
+		Port:              s.opts.ClusterPort,
+		AuthRequired:      false,
+		TLSRequired:       tlsReq,
+		SSLRequired:       tlsReq,
+		TLSVerify:         tlsReq,
+		MaxPayload:        s.info.MaxPayload,
+		ClientConnectURLs: clientConnectURLs,
 	}
 	// Check for Auth items
 	if s.opts.ClusterUsername != "" {

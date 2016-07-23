@@ -393,7 +393,7 @@ func (c *client) processConnect(arg []byte) error {
 		// clients map.
 		if c.opts.Protocol >= ClientProtoInfo {
 			srv.mu.Lock()
-			srv.nCliProtoInfo++
+			srv.cproto++
 			srv.mu.Unlock()
 		}
 
