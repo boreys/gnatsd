@@ -36,6 +36,7 @@ type route struct {
 	url          *url.URL
 	authRequired bool
 	tlsRequired  bool
+	connectURLs  []string
 }
 
 type connectInfo struct {
@@ -115,6 +116,9 @@ func (c *client) processRouteInfo(info *Info) {
 	// Copy over important information.
 	c.route.authRequired = info.AuthRequired
 	c.route.tlsRequired = info.TLSRequired
+	// Copy the URLs from the protocol message
+	c.route.connectURLs = make([]string, len(info.ConnectURLs))
+	copy(c.route.connectURLs, info.ConnectURLs)
 
 	// If we do not know this route's URL, construct one on the fly
 	// from the information provided.
@@ -153,9 +157,44 @@ func (c *client) processRouteInfo(info *Info) {
 			// Now let the known servers know about this new route
 			s.forwardNewRouteInfoToKnownServers(info)
 		}
+		// Send to our clients the array of all servers (including the one
+		// that we just accepted)
+		s.sendInfoWithServersToClients()
 	} else {
 		c.Debugf("Detected duplicate remote route %q", info.ID)
 		c.closeConnection()
+	}
+}
+
+// sendInfoWithServersToClients generates an INFO protocol with all
+// servers and send it to all connected clients that accept async
+// INFO updates.
+func (s *Server) sendInfoWithServersToClients() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If there are no client supporting the async INFOs, we are done.
+	if s.nCliProtoInfo == 0 {
+		return
+	}
+
+	// Get the proto with all routes
+	proto := s.getProtoInfoWithServers()
+	if proto == nil {
+		// This means that we don't have any route, or none that has
+		// the host:port info for clients to connect to (older servers).
+		return
+	}
+
+	// Send the info proto to the clients that support it
+	for _, c := range s.clients {
+		c.mu.Lock()
+		// Send only if we already sent the first PONG, if not, a new
+		// INFO will be generated at that time.
+		if c.fps && c.opts.Protocol >= ClientProtoInfo {
+			c.sendInfo(proto)
+		}
+		c.mu.Unlock()
 	}
 }
 
@@ -579,7 +618,18 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 
 // StartRouting will start the accept loop on the cluster host:port
 // and will actively try to connect to listed routes.
-func (s *Server) StartRouting() {
+func (s *Server) StartRouting(clientListenReady chan struct{}) {
+	defer s.grWG.Done()
+
+	// Wait for the client listen port to be opened, and
+	// the possible ephemeral port to be selected.
+	<-clientListenReady
+
+	// Get all possible URLs (when server listens to 0.0.0.0).
+	// This is going to be sent to other Servers, so that they can let their
+	// clients know about us.
+	connectURLs := s.getConnectURLs()
+
 	// Check for TLSConfig
 	tlsReq := s.opts.ClusterTLSConfig != nil
 	info := Info{
@@ -592,6 +642,7 @@ func (s *Server) StartRouting() {
 		SSLRequired:  tlsReq,
 		TLSVerify:    tlsReq,
 		MaxPayload:   s.info.MaxPayload,
+		ConnectURLs:  connectURLs,
 	}
 	// Check for Auth items
 	if s.opts.ClusterUsername != "" {

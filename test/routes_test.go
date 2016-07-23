@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
+	"strconv"
 )
+
+const clientProtoInfo = 1
 
 func shutdownServerAndWait(t *testing.T, s *server.Server) bool {
 	listenSpec := s.GetListenEndpoint()
@@ -655,4 +658,73 @@ func TestRouteConnectOnShutdownRace(t *testing.T) {
 	cQuit <- true
 
 	wg.Wait()
+}
+
+func TestRouteSendAsyncINFOToClients(t *testing.T) {
+	s, opts := runRouteServer(t)
+	defer s.Shutdown()
+
+	clientURL := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+
+	oldClient := createClientConn(t, opts.Host, opts.Port)
+	defer oldClient.Close()
+
+	oldClientSend, oldClientExpect := setupConn(t, oldClient)
+	oldClientSend("PING\r\n")
+	oldClientExpect(pongRe)
+
+	newClient := createClientConn(t, opts.Host, opts.Port)
+	defer newClient.Close()
+
+	newClientSend, newClientExpect := setupConnWithProto(t, newClient, clientProtoInfo)
+	newClientSend("PING\r\n")
+	newClientExpect(pongRe)
+
+	rc := createRouteConn(t, opts.ClusterHost, opts.ClusterPort)
+	defer rc.Close()
+
+	routeID := "Server-B"
+	routeSend, routeExpect := setupRouteEx(t, rc, opts, routeID)
+
+	buf := routeExpect(infoRe)
+	info := server.Info{}
+	if err := json.Unmarshal(buf[4:], &info); err != nil {
+		t.Fatalf("Could not unmarshal route info: %v", err)
+	}
+	if len(info.ConnectURLs) == 0 {
+		t.Fatal("Expected a list of URLs, got none")
+	}
+	if info.ConnectURLs[0] != clientURL {
+		t.Fatalf("Expected RemoteClientURL to be %q, got %q", clientURL, info.ConnectURLs[0])
+	}
+	routeInfo := server.Info{}
+	routeInfo.ID = routeID
+	routeInfo.Host = "localhost"
+	routeInfo.Port = 5222
+	routeConnectURLs := net.JoinHostPort(routeInfo.Host, strconv.Itoa(routeInfo.Port))
+	routeInfo.ConnectURLs = []string{routeConnectURLs}
+	b, err := json.Marshal(routeInfo)
+	if err != nil {
+		t.Fatalf("Could not marshal test route info: %v", err)
+	}
+	infoJSON := fmt.Sprintf("INFO %s\r\n", b)
+	routeSend(infoJSON)
+	routeSend("PING\r\n")
+	routeExpect(pongRe)
+
+	// Expect nothing for old clients
+	expectNothing(t, oldClient)
+
+	// Expect new client to receive an INFO
+	buf = newClientExpect(infoRe)
+	info = server.Info{}
+	if err := json.Unmarshal(buf[4:], &info); err != nil {
+		t.Fatalf("Could not unmarshal route info: %v", err)
+	}
+	if len(info.ConnectURLs) == 0 {
+		t.Fatal("Expected a list of URLs, got none")
+	}
+	if info.ConnectURLs[0] != routeConnectURLs {
+		t.Fatalf("Expected RemoteClientURL to be %q, got %q", routeConnectURLs, info.ConnectURLs[0])
+	}
 }

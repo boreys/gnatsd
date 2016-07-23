@@ -24,17 +24,18 @@ import (
 // Info is the information sent to clients to help them understand information
 // about this server.
 type Info struct {
-	ID           string `json:"server_id"`
-	Version      string `json:"version"`
-	GoVersion    string `json:"go"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	AuthRequired bool   `json:"auth_required"`
-	SSLRequired  bool   `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
-	TLSRequired  bool   `json:"tls_required"`
-	TLSVerify    bool   `json:"tls_verify"`
-	MaxPayload   int    `json:"max_payload"`
-	IP           string `json:"ip,omitempty"`
+	ID           string   `json:"server_id"`
+	Version      string   `json:"version"`
+	GoVersion    string   `json:"go"`
+	Host         string   `json:"host"`
+	Port         int      `json:"port"`
+	AuthRequired bool     `json:"auth_required"`
+	SSLRequired  bool     `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
+	TLSRequired  bool     `json:"tls_required"`
+	TLSVerify    bool     `json:"tls_verify"`
+	MaxPayload   int      `json:"max_payload"`
+	IP           string   `json:"ip,omitempty"`
+	ConnectURLs  []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
 }
 
 // Server is our main struct.
@@ -69,6 +70,7 @@ type Server struct {
 	grTmpClients  map[uint64]*client
 	grRunning     bool
 	grWG          sync.WaitGroup // to wait on various go routines
+	nCliProtoInfo int64          // number of clients supporting async INFO
 }
 
 // Make sure all are 64bits for atomic use
@@ -236,9 +238,15 @@ func (s *Server) Start() {
 		s.StartHTTPSMonitoring()
 	}
 
+	// The Routing routine needs to wait for the client listen
+	// port to be opened and potential ephemeral port selected.
+	clientListenReady := make(chan struct{})
+
 	// Start up routing as well if needed.
 	if s.opts.ClusterPort != 0 {
-		s.StartRouting()
+		s.startGoRoutine(func() {
+			s.StartRouting(clientListenReady)
+		})
 	}
 
 	// Pprof http endpoint for the profiler.
@@ -247,7 +255,7 @@ func (s *Server) Start() {
 	}
 
 	// Wait for clients.
-	s.AcceptLoop()
+	s.AcceptLoop(clientListenReady)
 }
 
 // Shutdown will shutdown the server instance by kicking out the AcceptLoop
@@ -329,7 +337,7 @@ func (s *Server) Shutdown() {
 }
 
 // AcceptLoop is exported for easier testing.
-func (s *Server) AcceptLoop() {
+func (s *Server) AcceptLoop(clientListenReady chan struct{}) {
 	hp := net.JoinHostPort(s.opts.Host, strconv.Itoa(s.opts.Port))
 	Noticef("Listening for client connections on %s", hp)
 	l, e := net.Listen("tcp", hp)
@@ -369,6 +377,9 @@ func (s *Server) AcceptLoop() {
 		s.opts.Port = portNum
 	}
 	s.mu.Unlock()
+
+	// Let the caller know that we are ready
+	close(clientListenReady)
 
 	tmpDelay := ACCEPT_MIN_SLEEP
 
@@ -597,6 +608,42 @@ func (s *Server) createClient(conn net.Conn) *client {
 	return c
 }
 
+// getProtoInfoWithServers returns the INFO protocol (as a byte array) with
+// an array of URLs corresponding to all routed servers that clients can
+// connect to. If there is no route (or only older servers that did not
+// provide required information), returns nil.
+// Assumes server's lock to be held upon entering.
+func (s *Server) getProtoInfoWithServers() []byte {
+	if len(s.routes) == 0 {
+		return nil
+	}
+
+	// First gather all routes
+	urls := make([]string, 0, len(s.routes))
+	for _, c := range s.routes {
+		r := c.route
+		// Disregard routes for which we don't have the remote client's host:port information
+		if r == nil || len(r.connectURLs) == 0 {
+			continue
+		}
+		for _, url := range r.connectURLs {
+			urls = append(urls, url)
+		}
+	}
+
+	// Could be that all routes are from older servers that did not provide
+	// required information.
+	if len(urls) == 0 {
+		return nil
+	}
+
+	// Build the proto
+	info := s.info
+	info.ConnectURLs = urls
+	b, _ := json.Marshal(info)
+	return []byte(fmt.Sprintf("INFO %s %s", b, CR_LF))
+}
+
 // Handle closing down a connection when the handshake has timedout.
 func tlsTimeout(c *client, conn *tls.Conn) {
 	c.mu.Lock()
@@ -700,12 +747,19 @@ func (s *Server) removeClient(c *client) {
 	if r != nil {
 		rID = r.remoteID
 	}
+	updateProtoInfoCount := false
+	if typ == CLIENT && c.opts.Protocol >= ClientProtoInfo {
+		updateProtoInfoCount = true
+	}
 	c.mu.Unlock()
 
 	s.mu.Lock()
 	switch typ {
 	case CLIENT:
 		delete(s.clients, cid)
+		if updateProtoInfoCount {
+			s.nCliProtoInfo--
+		}
 	case ROUTER:
 		delete(s.routes, cid)
 		if r != nil {
@@ -823,4 +877,45 @@ func (s *Server) startGoRoutine(f func()) {
 		go f()
 	}
 	s.grMu.Unlock()
+}
+
+// getConnectURLs returns suitable URLs for clients to connect to the listen
+// port based on the server options' Host and Port. If the Host is localhost
+// or "any", this call returns the list of resolved IP addresses.
+func (s *Server) getConnectURLs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sport := strconv.Itoa(s.opts.Port)
+	urls := make([]string, 0, 1)
+
+	ipAddr, err := net.ResolveIPAddr("ip", s.opts.Host)
+	// If the host is "any" (0.0.0.0 or ::), get specific IPs from available
+	// interfaces.
+	if err == nil && ipAddr.IP.IsUnspecified() {
+		var ip net.IP
+		ifaces, _ := net.Interfaces()
+		for _, i := range ifaces {
+			addrs, _ := i.Addrs()
+			for _, addr := range addrs {
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				// Skip loopback/localhost
+				if ip.IsLoopback() {
+					ip = nil
+					continue
+				}
+				urls = append(urls, net.JoinHostPort(ip.String(), sport))
+			}
+		}
+	}
+	// Make sure we return at least one!
+	if err != nil || len(urls) == 0 {
+		urls = append(urls, net.JoinHostPort(s.opts.Host, sport))
+	}
+	return urls
 }

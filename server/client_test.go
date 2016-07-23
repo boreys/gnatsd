@@ -185,7 +185,7 @@ func TestClientConnectProto(t *testing.T) {
 	}
 
 	// ProtoInfo
-	connectOp = []byte("CONNECT {\"protocol\":1}\r\n")
+	connectOp = []byte(fmt.Sprintf("CONNECT {\"verbose\":true,\"pedantic\":true,\"ssl_required\":false,\"protocol\":%d}\r\n", ClientProtoInfo))
 	err = c.parse(connectOp)
 	if err != nil {
 		t.Fatalf("Received error: %v\n", err)
@@ -195,6 +195,9 @@ func TestClientConnectProto(t *testing.T) {
 	}
 	if !reflect.DeepEqual(c.opts, clientOpts{Verbose: true, Pedantic: true, Protocol: ClientProtoInfo}) {
 		t.Fatalf("Did not parse connect options correctly: %+v\n", c.opts)
+	}
+	if c.opts.Protocol != ClientProtoInfo {
+		t.Fatalf("Protocol should have been set to %v, but is set to %v", ClientProtoInfo, c.opts.Protocol)
 	}
 
 	// Illegal Option

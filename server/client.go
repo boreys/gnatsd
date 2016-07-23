@@ -68,13 +68,13 @@ type client struct {
 	atmr  *time.Timer
 	ptmr  *time.Timer
 	pout  int
+	fps   bool // First PONG sent. Used for async INFO updates.
 	wfc   int
 	msgb  [msgScratchSize]byte
 	last  time.Time
 	parseState
 
 	route *route
-	debug bool
 	trace bool
 }
 
@@ -142,7 +142,6 @@ func (c *client) initClient() {
 	c.cid = atomic.AddUint64(&s.gcid, 1)
 	c.bw = bufio.NewWriterSize(c.nc, startBufSize)
 	c.subs = make(map[string]*subscription)
-	c.debug = (atomic.LoadInt32(&debug) != 0)
 	c.trace = (atomic.LoadInt32(&trace) != 0)
 
 	// This is a scratch buffer used for processMsg()
@@ -388,6 +387,16 @@ func (c *client) processConnect(arg []byte) error {
 	}
 
 	if srv != nil {
+		// As soon as c.opts is unmarshalled and if the proto is at
+		// least ClientProtoInfo, we need to increment the following counter.
+		// This is decremented when client is removed from the server's
+		// clients map.
+		if c.opts.Protocol >= ClientProtoInfo {
+			srv.mu.Lock()
+			srv.nCliProtoInfo++
+			srv.mu.Unlock()
+		}
+
 		// Check for Auth
 		if ok := srv.checkAuth(c); !ok {
 			c.authViolation()
@@ -492,7 +501,30 @@ func (c *client) processPing() {
 		c.clearConnection()
 		c.Debugf("Error on Flush, error %s", err.Error())
 	}
+	srv := c.srv
+	// Send the updated INFO only after first PONG is sent
+	sendUpdateINFO := false
+	if !c.fps {
+		c.fps = true
+		sendUpdateINFO = c.opts.Protocol >= ClientProtoInfo && srv != nil
+	}
 	c.mu.Unlock()
+
+	// Some clients send an initial PING as part of the synchronous connect process.
+	// They can't be receiving anything until the first PONG is received.
+	// So we delay the possible updated INFO after this point.
+	if sendUpdateINFO {
+		srv.mu.Lock()
+		proto := srv.getProtoInfoWithServers()
+		srv.mu.Unlock()
+
+		// proto will be nil if the protocol would have an empty "connectURLs" array.
+		if proto != nil {
+			c.mu.Lock()
+			c.sendInfo(proto)
+			c.mu.Unlock()
+		}
+	}
 }
 
 func (c *client) processPong() {
